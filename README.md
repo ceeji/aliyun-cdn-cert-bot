@@ -30,5 +30,5 @@ go get "github.com/denverdino/aliyungo/cdn"
 
 # Showcase / 案例
 
-- [ceeji.net](https://ceeji.net "笃志者")
-- [zhihuitonghua.baiyan.tech](zhihuitonghua.baiyan.tech "智绘童话")
+- [笃志者](https://ceeji.net "笃志者")
+- [智绘童话](zhihuitonghua.baiyan.tech "智绘童话")
