@@ -24,7 +24,11 @@ go get "github.com/denverdino/aliyungo/cdn"
 
 输出错误为 nil 即为成功。
 
-# Users / 用户
+建议结合 `crontab` 设置定时任务，每天执行一次。
+
+对于 `acme.sh` 用户，你可以直接设置相关路径到 `~/.acme.sh/证书名称/文件` 这样的路径。
+
+# Showcase / 案例
 
 - [ceeji.net](https://ceeji.net "笃志者")
 - [zhihuitonghua.baiyan.tech](zhihuitonghua.baiyan.tech "智绘童话")
