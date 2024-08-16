@@ -42,7 +42,7 @@ func main() {
 	}
 
 	// 生成一个不重复的证书名称
-	var certName = "cert" + time.Now().Format("20060102150405")
+	var certName = "cert" + time.Now().Format("20060102150405.000")
 
 	// 记录日志
 	fmt.Println("time: ", time.Now().Format("2006-01-02 15:04:05"))
