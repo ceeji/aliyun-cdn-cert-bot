@@ -201,7 +201,6 @@ func updateCertificate(project Project) error {
 
 		// Prepare the payload for APISIX Admin API
 		payload := map[string]interface{}{
-			"id":   project.Name, // Use name as the certificate ID
 			"cert": string(cert),
 			"key":  string(key),
 			"snis": snis,
@@ -213,7 +212,7 @@ func updateCertificate(project Project) error {
 
 		// Send the request to APISIX Admin API
 		encodedProjectName := url.QueryEscape(project.Name)
-		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssl/%s", project.ApisixAdminURL, encodedProjectName), bytes.NewBuffer(payloadBytes))
+		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssls/%s", project.ApisixAdminURL, encodedProjectName), bytes.NewBuffer(payloadBytes))
 		if err != nil {
 			return fmt.Errorf("failed to create HTTP request: %v", err)
 		}
