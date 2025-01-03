@@ -1,8 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	cas20200407 "github.com/alibabacloud-go/cas-20200407/v2/client"
@@ -28,10 +35,14 @@ type Project struct {
 	OssBucket       string `yaml:"oss_bucket,omitempty"`
 	OssEndpoint     string `yaml:"oss_endpoint,omitempty"`
 	OssRegion       string `yaml:"oss_region,omitempty"`
+	ApisixAdminURL  string `yaml:"apisix_admin_url,omitempty"` // 新增字段，用于 APISIX 模式
+	ApisixAdminKey  string `yaml:"apisix_admin_key,omitempty"` // 新增字段，用于 APISIX 模式
 }
 
 func main() {
-	configFile := "config.yml"
+	// 获取程序可执行文件所在目录
+	dir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+	configFile := filepath.Join(dir, "config.yml")
 	configData, err := os.ReadFile(configFile)
 	if err != nil {
 		fmt.Printf("[ERROR] Failed to read config file: %v\n", err)
@@ -78,6 +89,25 @@ func main() {
 	}
 
 	fmt.Printf("\n========== Process Completed ==========\n")
+}
+
+// extractDomainsFromCert 从证书中提取域名
+func extractDomainsFromCert(certPEM string) ([]string, error) {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to parse certificate PEM")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	// Collect domains from SAN (Subject Alternative Names)
+	var domains []string
+	domains = append(domains, cert.DNSNames...)
+
+	return domains, nil
 }
 
 func updateCertificate(project Project) error {
@@ -159,7 +189,48 @@ func updateCertificate(project Project) error {
 
 		fmt.Printf("[INFO] Certificate bound successfully to OSS\n")
 	case "apisix":
-		return fmt.Errorf("APISIX mode is not implemented yet")
+		if project.ApisixAdminURL == "" || project.ApisixAdminKey == "" {
+			return fmt.Errorf("APISIX admin URL and key are required for APISIX mode")
+		}
+
+		snis, err := extractDomainsFromCert(string(cert))
+		if err != nil {
+			return fmt.Errorf("failed to extract domains from certificate: %v", err)
+		}
+
+		// Prepare the payload for APISIX Admin API
+		payload := map[string]interface{}{
+			"id":   project.Name, // Use name as the certificate ID
+			"cert": string(cert),
+			"key":  string(key),
+			"snis": snis,
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %v", err)
+		}
+
+		// Send the request to APISIX Admin API
+		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssl/%s", project.ApisixAdminURL, project.Domain), bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return fmt.Errorf("failed to create HTTP request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", project.ApisixAdminKey)
+
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to send request to APISIX Admin API: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("APISIX Admin API responded with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		fmt.Printf("[INFO] Certificate updated successfully in APISIX\n")
 	default:
 		return fmt.Errorf("unsupported mode: %s", project.Mode)
 	}
