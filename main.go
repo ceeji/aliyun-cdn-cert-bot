@@ -90,6 +90,10 @@ func main() {
 	}
 
 	fmt.Printf("\n========== Process Completed ==========\n")
+
+	if failCount > 0 {
+		os.Exit(1)
+	}
 }
 
 // extractDomainsFromCert 从证书中提取域名
