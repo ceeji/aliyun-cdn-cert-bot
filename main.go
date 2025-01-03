@@ -10,136 +10,159 @@ import (
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/denverdino/aliyungo/cdn"
+	"gopkg.in/yaml.v2"
 )
 
+type Config struct {
+	Projects []Project `yaml:"projects"`
+}
+
+type Project struct {
+	Name            string `yaml:"name"`
+	Mode            string `yaml:"mode"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	AccessKeySecret string `yaml:"access_key_secret"`
+	Domain          string `yaml:"domain"`
+	CertPath        string `yaml:"cert_path"`
+	KeyPath         string `yaml:"key_path"`
+	OssBucket       string `yaml:"oss_bucket,omitempty"`
+	OssEndpoint     string `yaml:"oss_endpoint,omitempty"`
+	OssRegion       string `yaml:"oss_region,omitempty"`
+}
+
 func main() {
-	// 调试专用
-	// os.Setenv("ALI_ACCESS_KEY_ID", "")
-	// os.Setenv("ALI_ACCESS_KEY_SECRET", "")
-	// os.Setenv("ALI_DOMAIN", "")
-	// os.Setenv("ALI_OSS_BUCKET", "")
-	// os.Setenv("ALI_CERT_PATH", "")
-	// os.Setenv("ALI_KEY_PATH", "")
-	// os.Setenv("ALI_OSS_ENDPOINT", "")
-	// os.Setenv("ALI_OSS_REGION", "")
+	configFile := "config.yml"
+	configData, err := os.ReadFile(configFile)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to read config file: %v\n", err)
+		os.Exit(1)
+	}
 
-	var ACCESS_KEY_ID = os.Getenv("ALI_ACCESS_KEY_ID")
-	var ACCESS_KEY_SECRET = os.Getenv("ALI_ACCESS_KEY_SECRET")
-	var domain = os.Getenv("ALI_DOMAIN")
-	var certPath = os.Getenv("ALI_CERT_PATH")
-	var keyPath = os.Getenv("ALI_KEY_PATH")
-	var ossBucket = os.Getenv("ALI_OSS_BUCKET")
-	// acme.sh 前两行
+	var config Config
+	err = yaml.Unmarshal(configData, &config)
+	if err != nil {
+		fmt.Printf("[ERROR] Failed to parse config file: %v\n", err)
+		os.Exit(1)
+	}
 
+	totalProjects := len(config.Projects)
+	successCount := 0
+	failures := []string{}
+
+	fmt.Printf("========== Starting Certificate Update ==========\n")
+	fmt.Printf("Total Projects: %d\n", totalProjects)
+
+	for _, project := range config.Projects {
+		fmt.Printf("\n[INFO] Processing project: %s (Domain: %s, Mode: %s)\n", project.Name, project.Domain, project.Mode)
+		err := updateCertificate(project)
+		if err != nil {
+			fmt.Printf("[ERROR] Failed to update certificate for project '%s': %v\n", project.Name, err)
+			failures = append(failures, project.Name)
+		} else {
+			fmt.Printf("[SUCCESS] Certificate updated successfully for project '%s'\n", project.Name)
+			successCount++
+		}
+	}
+
+	failCount := totalProjects - successCount
+	fmt.Printf("\n========== Summary ==========\n")
+	fmt.Printf("Total Projects: %d\n", totalProjects)
+	fmt.Printf("Successful: %d\n", successCount)
+	fmt.Printf("Failed: %d\n", failCount)
+
+	if failCount > 0 {
+		fmt.Printf("\nFailed Projects:\n")
+		for _, failure := range failures {
+			fmt.Printf("- %s\n", failure)
+		}
+	}
+
+	fmt.Printf("\n========== Process Completed ==========\n")
+}
+
+func updateCertificate(project Project) error {
 	var cert []byte
 	var key []byte
 	var err error
-	if cert, err = os.ReadFile(certPath); err != nil {
-		panic(err)
-	}
-	if key, err = os.ReadFile(keyPath); err != nil {
-		panic(err)
-	}
 
-	// 生成一个不重复的证书名称
-	var certName = "cert" + time.Now().Format("20060102150405.000")
-
-	// 记录日志
-	fmt.Println("time: ", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println("update cert for domain: ", domain)
-	fmt.Println("certName: ", certName)
-	if ossBucket != "" {
-		fmt.Println("ossBucket: ", ossBucket)
+	if cert, err = os.ReadFile(project.CertPath); err != nil {
+		return fmt.Errorf("failed to read certificate file: %v", err)
+	}
+	if key, err = os.ReadFile(project.KeyPath); err != nil {
+		return fmt.Errorf("failed to read key file: %v", err)
 	}
 
-	// 对于 CDN
-	if ossBucket == "" {
-		client := cdn.NewClient(ACCESS_KEY_ID, ACCESS_KEY_SECRET)
+	// Generate a unique certificate name
+	certName := "cert" + time.Now().Format("20060102150405.000")
+
+	fmt.Printf("[INFO] Generated certificate name: %s\n", certName)
+
+	switch project.Mode {
+	case "alicdn":
+		client := cdn.NewClient(project.AccessKeyID, project.AccessKeySecret)
 		res, err := client.SetDomainServerCertificate(cdn.CertificateRequest{
-			DomainName:              domain,
+			DomainName:              project.Domain,
 			CertName:                certName,
 			ServerCertificateStatus: "on",
 			ServerCertificate:       string(cert),
 			PrivateKey:              string(key),
 		})
-
-		fmt.Printf("res: %v, err: %v\n", res, err)
-		return
-	}
-
-	// 对于 OSS
-	if ossBucket != "" {
-		os.Setenv("OSS_ACCESS_KEY_ID", ACCESS_KEY_ID)
-		os.Setenv("OSS_ACCESS_KEY_SECRET", ACCESS_KEY_SECRET)
-		region := os.Getenv("ALI_OSS_REGION")
-		if region == "" {
-			fmt.Println("Error: OSS_REGION is required")
-			os.Exit(-1)
+		if err != nil {
+			return fmt.Errorf("failed to update certificate via Alicdn: %v", err)
 		}
-		endpoint := os.Getenv("ALI_OSS_ENDPOINT")
+		fmt.Printf("[INFO] Alicdn response: %v\n", res)
+	case "alioss":
+		os.Setenv("OSS_ACCESS_KEY_ID", project.AccessKeyID)
+		os.Setenv("OSS_ACCESS_KEY_SECRET", project.AccessKeySecret)
+		if project.OssRegion == "" {
+			return fmt.Errorf("OSS_REGION is required")
+		}
 
-		// 证书管理服务客户端
 		casClient, err := cas20200407.NewClient(&openapi.Config{
-			AccessKeyId:     tea.String(ACCESS_KEY_ID),
-			AccessKeySecret: tea.String(ACCESS_KEY_SECRET),
-
-			// endpoint参考：https://api.aliyun.com/product/cas
-			Endpoint: tea.String("cas.aliyuncs.com"),
+			AccessKeyId:     tea.String(project.AccessKeyID),
+			AccessKeySecret: tea.String(project.AccessKeySecret),
+			Endpoint:        tea.String("cas.aliyuncs.com"),
 		})
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to create CAS client: %v", err)
 		}
+
 		req := new(cas20200407.UploadUserCertificateRequest)
-		// 证书名称
 		req.Name = tea.String(certName)
-		// 证书私钥
 		req.Key = tea.String(string(key))
-		// 证书内容
 		req.Cert = tea.String(string(cert))
-		// 上传证书到证书管理服务
 		resp, err := casClient.UploadUserCertificate(req)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to upload certificate to CAS: %v", err)
 		}
-
 		if *resp.StatusCode != 200 {
-			fmt.Println("Error:", resp.Body)
-			os.Exit(-1)
-		}
-
-		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("CAS response error: %v", resp.Body)
 		}
 
 		certId := resp.Body.CertId
-
-		// 创建OSSClient实例。
-		// yourEndpoint填写Bucket对应的Endpoint，以华东1（杭州）为例，填写为https://oss-cn-hangzhou.aliyuncs.com。其它Region请按实际情况填写。
-		client, err := oss.New(endpoint, ACCESS_KEY_ID, ACCESS_KEY_SECRET)
+		client, err := oss.New(project.OssEndpoint, project.AccessKeyID, project.AccessKeySecret)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to create OSS client: %v", err)
 		}
 
-		var putCnameConfig oss.PutBucketCname
-		var CertificateConfig oss.CertificateConfiguration
-		// 填写自定义域名。
-		putCnameConfig.Cname = domain
-		// 填写证书ID。
-		CertificateConfig.CertId = fmt.Sprintf("%d-%s", *certId, os.Getenv("OSS_REGION"))
-		// CertificateConfig.Certificate = string(cert)
-		// CertificateConfig.PrivateKey = string(key)
-		CertificateConfig.Force = true
-		putCnameConfig.CertificateConfiguration = &CertificateConfig
-		err = client.PutBucketCnameWithCertificate(ossBucket, putCnameConfig)
+		putCnameConfig := oss.PutBucketCname{
+			Cname: project.Domain,
+			CertificateConfiguration: &oss.CertificateConfiguration{
+				CertId: fmt.Sprintf("%d-%s", *certId, project.OssRegion),
+				Force:  true,
+			},
+		}
+		err = client.PutBucketCnameWithCertificate(project.OssBucket, putCnameConfig)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to bind certificate to OSS: %v", err)
 		}
 
-		fmt.Printf("Bind Certificate Success!")
+		fmt.Printf("[INFO] Certificate bound successfully to OSS\n")
+	case "apisix":
+		return fmt.Errorf("APISIX mode is not implemented yet")
+	default:
+		return fmt.Errorf("unsupported mode: %s", project.Mode)
 	}
+
+	return nil
 }
