@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -211,7 +212,8 @@ func updateCertificate(project Project) error {
 		}
 
 		// Send the request to APISIX Admin API
-		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssl/%s", project.ApisixAdminURL, project.Domain), bytes.NewBuffer(payloadBytes))
+		encodedProjectName := url.QueryEscape(project.Name)
+		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssl/%s", project.ApisixAdminURL, encodedProjectName), bytes.NewBuffer(payloadBytes))
 		if err != nil {
 			return fmt.Errorf("failed to create HTTP request: %v", err)
 		}
