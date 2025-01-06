@@ -22,7 +22,8 @@ import (
 )
 
 type Config struct {
-	Projects []Project `yaml:"projects"`
+	Projects             []Project `yaml:"projects"`
+	QiyewechatWebhookUrl string    `yaml:"qiyewechat_webhook_url"`
 }
 
 type Project struct {
@@ -42,20 +43,27 @@ type Project struct {
 	K8sSecretName   string `yaml:"k8s_secret_name,omitempty"`  // Kubernetes secret name
 }
 
+var allOutput string
+
+func writeOutput(format string, values ...any) {
+	fmt.Printf(format, values...)
+	allOutput += fmt.Sprintf(format, values...)
+}
+
 func main() {
 	// 获取程序可执行文件所在目录
 	dir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	configFile := filepath.Join(dir, "config.yml")
 	configData, err := os.ReadFile(configFile)
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to read config file: %v\n", err)
+		writeOutput("[ERROR] Failed to read config file: %v\n", err)
 		os.Exit(1)
 	}
 
 	var config Config
 	err = yaml.Unmarshal(configData, &config)
 	if err != nil {
-		fmt.Printf("[ERROR] Failed to parse config file: %v\n", err)
+		writeOutput("[ERROR] Failed to parse config file: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -63,35 +71,39 @@ func main() {
 	successCount := 0
 	failures := []string{}
 
-	fmt.Printf("========== Starting Certificate Update ==========\n")
-	fmt.Printf("Total Projects: %d\n", totalProjects)
+	writeOutput("========== Starting Certificate Update ==========\n")
+	writeOutput("Total Projects: %d\n", totalProjects)
 
 	for _, project := range config.Projects {
-		fmt.Printf("\n[INFO] Processing project: %s (Domain: %s, Mode: %s)\n", project.Name, project.Domain, project.Mode)
+		writeOutput("\n[INFO] Processing project: %s (Domain: %s, Mode: %s)\n", project.Name, project.Domain, project.Mode)
 		err := updateCertificate(project)
 		if err != nil {
-			fmt.Printf("[ERROR] Failed to update certificate for project '%s': %v\n", project.Name, err)
+			writeOutput("[ERROR] Failed to update certificate for project '%s': %v\n", project.Name, err)
 			failures = append(failures, project.Name)
 		} else {
-			fmt.Printf("[SUCCESS] Certificate updated successfully for project '%s'\n", project.Name)
+			writeOutput("[SUCCESS] Certificate updated successfully for project '%s'\n", project.Name)
 			successCount++
 		}
 	}
 
 	failCount := totalProjects - successCount
-	fmt.Printf("\n========== Summary ==========\n")
-	fmt.Printf("Total Projects: %d\n", totalProjects)
-	fmt.Printf("Successful: %d\n", successCount)
-	fmt.Printf("Failed: %d\n", failCount)
+	writeOutput("\n========== Summary ==========\n")
+	writeOutput("Total Projects: %d\n", totalProjects)
+	writeOutput("Successful: %d\n", successCount)
+	writeOutput("Failed: %d\n", failCount)
 
 	if failCount > 0 {
-		fmt.Printf("\nFailed Projects:\n")
+		writeOutput("\nFailed Projects:\n")
 		for _, failure := range failures {
-			fmt.Printf("- %s\n", failure)
+			writeOutput("- %s\n", failure)
 		}
 	}
 
-	fmt.Printf("\n========== Process Completed ==========\n")
+	writeOutput("\n========== Process Completed ==========\n")
+
+	if config.QiyewechatWebhookUrl != "" {
+		sendAlert(config.QiyewechatWebhookUrl, allOutput)
+	}
 
 	if failCount > 0 {
 		os.Exit(1)
@@ -132,7 +144,7 @@ func updateCertificate(project Project) error {
 	// Generate a unique certificate name
 	certName := "cert" + time.Now().Format("20060102150405.000")
 
-	fmt.Printf("[INFO] Generated certificate name: %s\n", certName)
+	writeOutput("[INFO] Generated certificate name: %s\n", certName)
 
 	switch project.Mode {
 	case "alicdn":
@@ -147,7 +159,7 @@ func updateCertificate(project Project) error {
 		if err != nil {
 			return fmt.Errorf("failed to update certificate via Alicdn: %v", err)
 		}
-		fmt.Printf("[INFO] Alicdn response: %v\n", res)
+		writeOutput("[INFO] Alicdn response: %v\n", res)
 	case "alioss":
 		os.Setenv("OSS_ACCESS_KEY_ID", project.AccessKeyID)
 		os.Setenv("OSS_ACCESS_KEY_SECRET", project.AccessKeySecret)
@@ -194,7 +206,7 @@ func updateCertificate(project Project) error {
 			return fmt.Errorf("failed to bind certificate to OSS: %v", err)
 		}
 
-		fmt.Printf("[INFO] Certificate bound successfully to OSS\n")
+		writeOutput("[INFO] Certificate bound successfully to OSS\n")
 	case "apisix":
 		if project.ApisixAdminURL == "" || project.ApisixAdminKey == "" {
 			return fmt.Errorf("APISIX admin URL and key are required for APISIX mode")
@@ -237,7 +249,7 @@ func updateCertificate(project Project) error {
 			return fmt.Errorf("APISIX Admin API responded with status %d: %s", resp.StatusCode, string(body))
 		}
 
-		fmt.Printf("[INFO] Certificate updated successfully in APISIX\n")
+		writeOutput("[INFO] Certificate updated successfully in APISIX\n")
 	case "k8s-secret":
 		clientset, err := getClientset()
 		if err != nil {
@@ -247,7 +259,7 @@ func updateCertificate(project Project) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("[INFO] kubernates' secret updated successfully\n")
+		writeOutput("[INFO] kubernates' secret updated successfully\n")
 	default:
 		return fmt.Errorf("unsupported mode: %s", project.Mode)
 	}

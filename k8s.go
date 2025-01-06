@@ -43,6 +43,6 @@ func updateK8sSecretCert(clientset *kubernetes.Clientset, project Project, cert,
 		return fmt.Errorf("failed to update Kubernetes secret: %v", err)
 	}
 
-	fmt.Printf("[INFO] Kubernetes secret '%s' in namespace '%s' updated successfully\n", project.K8sSecretName, project.K8sNamespace)
+	writeOutput("[INFO] Kubernetes secret '%s' in namespace '%s' updated successfully\n", project.K8sSecretName, project.K8sNamespace)
 	return nil
 }
