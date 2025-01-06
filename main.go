@@ -36,8 +36,10 @@ type Project struct {
 	OssBucket       string `yaml:"oss_bucket,omitempty"`
 	OssEndpoint     string `yaml:"oss_endpoint,omitempty"`
 	OssRegion       string `yaml:"oss_region,omitempty"`
-	ApisixAdminURL  string `yaml:"apisix_admin_url,omitempty"` // 新增字段，用于 APISIX 模式
-	ApisixAdminKey  string `yaml:"apisix_admin_key,omitempty"` // 新增字段，用于 APISIX 模式
+	ApisixAdminURL  string `yaml:"apisix_admin_url,omitempty"` //  APISIX 模式
+	ApisixAdminKey  string `yaml:"apisix_admin_key,omitempty"` //  APISIX 模式
+	K8sNamespace    string `yaml:"k8s_namespace,omitempty"`    // Kubernetes namespace
+	K8sSecretName   string `yaml:"k8s_secret_name,omitempty"`  // Kubernetes secret name
 }
 
 func main() {
@@ -236,6 +238,16 @@ func updateCertificate(project Project) error {
 		}
 
 		fmt.Printf("[INFO] Certificate updated successfully in APISIX\n")
+	case "k8s-secret":
+		clientset, err := getClientset()
+		if err != nil {
+			return fmt.Errorf("filed to get kuernates clientset: %+v", err)
+		}
+		err = updateK8sSecretCert(clientset, project, cert, key)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("[INFO] kubernates' secret updated successfully\n")
 	default:
 		return fmt.Errorf("unsupported mode: %s", project.Mode)
 	}
