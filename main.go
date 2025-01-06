@@ -102,7 +102,10 @@ func main() {
 	writeOutput("\n========== Process Completed ==========\n")
 
 	if config.QiyewechatWebhookUrl != "" {
-		sendAlert(config.QiyewechatWebhookUrl, allOutput)
+		err = sendAlert(config.QiyewechatWebhookUrl, allOutput)
+		if err != nil {
+			writeOutput("[ERROR] Failed to send webhook: %v", err)
+		}
 	}
 
 	if failCount > 0 {
