@@ -10,4 +10,5 @@ Update your Aliyun's CDN certificate automatically. 自动更新你的阿里云 
 # Showcase / 案例
 
 - [笃志者](https://ceeji.net "笃志者")
-- [智绘童话](zhihuitonghua.baiyan.tech "智绘童话")
+- [百言 AI](https://ai.baiyan.tech "百言AI")
+- [百言科技](https://www.baiyan.tech "百言科技")
