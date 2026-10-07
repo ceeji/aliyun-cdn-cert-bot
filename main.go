@@ -170,7 +170,9 @@ func updateCertificateMaterial(project Project, cert, key []byte) error {
 		putCnameConfig := oss.PutBucketCname{
 			Cname: project.Domain,
 			CertificateConfiguration: &oss.CertificateConfiguration{
-				CertId: fmt.Sprintf("%d-%s", *certId, project.OssRegion),
+				// cas.aliyuncs.com stores this upload in cn-hangzhou, even
+				// when the destination OSS bucket is in another region.
+				CertId: fmt.Sprintf("%d-cn-hangzhou", *certId),
 				Force:  true,
 			},
 		}
