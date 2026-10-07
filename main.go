@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,9 +52,18 @@ func writeOutput(format string, values ...any) {
 }
 
 func main() {
+	check := flag.Bool("check", false, "validate all local certificates without cloud requests")
+	verify := flag.Bool("verify", false, "read cloud certificate status without updates")
+	force := flag.Bool("force", false, "deploy even when the cloud certificate already matches")
+	noNotify := flag.Bool("no-notify", false, "do not send the configured notification")
+	configPath := flag.String("config", "", "configuration path (defaults to executable directory)")
+	flag.Parse()
 	// 获取程序可执行文件所在目录
 	dir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
 	configFile := filepath.Join(dir, "config.yml")
+	if *configPath != "" {
+		configFile = *configPath
+	}
 	configData, err := os.ReadFile(configFile)
 	if err != nil {
 		writeOutput("[ERROR] Failed to read config file: %v\n", err)
@@ -67,48 +77,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	totalProjects := len(config.Projects)
-	successCount := 0
-	failures := []string{}
-
-	writeOutput("========== Starting Certificate Update ==========\n")
-	writeOutput("Total Projects: %d\n", totalProjects)
-
-	for _, project := range config.Projects {
-		writeOutput("\n[INFO] Processing project: %s (Domain: %s, Mode: %s)\n", project.Name, project.Domain, project.Mode)
-		err := updateCertificate(project)
-		if err != nil {
-			writeOutput("[ERROR] Failed to update certificate for project '%s': %v\n", project.Name, err)
-			failures = append(failures, project.Name)
-		} else {
-			writeOutput("[SUCCESS] Certificate updated successfully for project '%s'\n", project.Name)
-			successCount++
-		}
+	if (*check && (*verify || *force)) || (*verify && *force) {
+		writeOutput("[ERROR] incompatible options\n")
+		os.Exit(2)
 	}
-
-	failCount := totalProjects - successCount
-	writeOutput("\n========== Summary ==========\n")
-	writeOutput("Total Projects: %d\n", totalProjects)
-	writeOutput("Successful: %d\n", successCount)
-	writeOutput("Failed: %d\n", failCount)
-
-	if failCount > 0 {
-		writeOutput("\nFailed Projects:\n")
-		for _, failure := range failures {
-			writeOutput("- %s\n", failure)
-		}
-	}
-
-	writeOutput("\n========== Process Completed ==========\n")
-
-	if config.QiyewechatWebhookUrl != "" {
+	err = processProjects(config.Projects, *check, *verify, *force, cloudMatches, updateCertificateMaterial)
+	if config.QiyewechatWebhookUrl != "" && !*noNotify && !*check && !*verify {
 		err = sendAlert(config.QiyewechatWebhookUrl, allOutput)
 		if err != nil {
 			writeOutput("[ERROR] Failed to send webhook: %v", err)
 		}
 	}
 
-	if failCount > 0 {
+	if err != nil {
 		os.Exit(1)
 	}
 }
@@ -132,18 +113,7 @@ func extractDomainsFromCert(certPEM string) ([]string, error) {
 	return domains, nil
 }
 
-func updateCertificate(project Project) error {
-	var cert []byte
-	var key []byte
-	var err error
-
-	if cert, err = os.ReadFile(project.CertPath); err != nil {
-		return fmt.Errorf("failed to read certificate file: %v", err)
-	}
-	if key, err = os.ReadFile(project.KeyPath); err != nil {
-		return fmt.Errorf("failed to read key file: %v", err)
-	}
-
+func updateCertificateMaterial(project Project, cert, key []byte) error {
 	// Generate a unique certificate name
 	certName := "cert" + time.Now().Format("20060102150405.000")
 
@@ -240,7 +210,7 @@ func updateCertificate(project Project) error {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-API-KEY", project.ApisixAdminKey)
 
-		client := &http.Client{}
+		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("failed to send request to APISIX Admin API: %v", err)
