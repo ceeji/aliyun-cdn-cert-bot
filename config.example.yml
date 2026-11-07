@@ -1,0 +1,8 @@
+projects:
+  - name: cdn-xxx
+    mode: alicdn
+    access_key_id: xxx
+    access_key_secret: xxx
+    domain: a.com
+    cert_path: "/xxx/fullchain.cer"
+    key_path: "/xxx/a.com.key"

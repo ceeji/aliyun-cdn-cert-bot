@@ -1,8 +1,17 @@
 package main
 
 import (
+	"bytes"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
 	cas20200407 "github.com/alibabacloud-go/cas-20200407/v2/client"
@@ -10,136 +19,225 @@ import (
 	"github.com/alibabacloud-go/tea/tea"
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/denverdino/aliyungo/cdn"
+	"gopkg.in/yaml.v2"
 )
 
+type Config struct {
+	Projects             []Project `yaml:"projects"`
+	QiyewechatWebhookUrl string    `yaml:"qiyewechat_webhook_url"`
+}
+
+type Project struct {
+	Name            string `yaml:"name"`
+	Mode            string `yaml:"mode"`
+	AccessKeyID     string `yaml:"access_key_id"`
+	AccessKeySecret string `yaml:"access_key_secret"`
+	Domain          string `yaml:"domain"`
+	CertPath        string `yaml:"cert_path"`
+	KeyPath         string `yaml:"key_path"`
+	OssBucket       string `yaml:"oss_bucket,omitempty"`
+	OssEndpoint     string `yaml:"oss_endpoint,omitempty"`
+	OssRegion       string `yaml:"oss_region,omitempty"`
+	ApisixAdminURL  string `yaml:"apisix_admin_url,omitempty"` //  APISIX 模式
+	ApisixAdminKey  string `yaml:"apisix_admin_key,omitempty"` //  APISIX 模式
+	K8sNamespace    string `yaml:"k8s_namespace,omitempty"`    // Kubernetes namespace
+	K8sSecretName   string `yaml:"k8s_secret_name,omitempty"`  // Kubernetes secret name
+}
+
+var allOutput string
+
+func writeOutput(format string, values ...any) {
+	fmt.Printf(format, values...)
+	allOutput += fmt.Sprintf(format, values...)
+}
+
 func main() {
-	// 调试专用
-	// os.Setenv("ALI_ACCESS_KEY_ID", "")
-	// os.Setenv("ALI_ACCESS_KEY_SECRET", "")
-	// os.Setenv("ALI_DOMAIN", "")
-	// os.Setenv("ALI_OSS_BUCKET", "")
-	// os.Setenv("ALI_CERT_PATH", "")
-	// os.Setenv("ALI_KEY_PATH", "")
-	// os.Setenv("ALI_OSS_ENDPOINT", "")
-	// os.Setenv("ALI_OSS_REGION", "")
-
-	var ACCESS_KEY_ID = os.Getenv("ALI_ACCESS_KEY_ID")
-	var ACCESS_KEY_SECRET = os.Getenv("ALI_ACCESS_KEY_SECRET")
-	var domain = os.Getenv("ALI_DOMAIN")
-	var certPath = os.Getenv("ALI_CERT_PATH")
-	var keyPath = os.Getenv("ALI_KEY_PATH")
-	var ossBucket = os.Getenv("ALI_OSS_BUCKET")
-	// acme.sh 前两行
-
-	var cert []byte
-	var key []byte
-	var err error
-	if cert, err = os.ReadFile(certPath); err != nil {
-		panic(err)
+	check := flag.Bool("check", false, "validate all local certificates without cloud requests")
+	verify := flag.Bool("verify", false, "read cloud certificate status without updates")
+	force := flag.Bool("force", false, "deploy even when the cloud certificate already matches")
+	noNotify := flag.Bool("no-notify", false, "do not send the configured notification")
+	configPath := flag.String("config", "", "configuration path (defaults to executable directory)")
+	flag.Parse()
+	// 获取程序可执行文件所在目录
+	dir, _ := filepath.Abs(filepath.Dir(os.Args[0]))
+	configFile := filepath.Join(dir, "config.yml")
+	if *configPath != "" {
+		configFile = *configPath
 	}
-	if key, err = os.ReadFile(keyPath); err != nil {
-		panic(err)
+	configData, err := os.ReadFile(configFile)
+	if err != nil {
+		writeOutput("[ERROR] Failed to read config file: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 生成一个不重复的证书名称
-	var certName = "cert" + time.Now().Format("20060102150405.000")
-
-	// 记录日志
-	fmt.Println("time: ", time.Now().Format("2006-01-02 15:04:05"))
-	fmt.Println("update cert for domain: ", domain)
-	fmt.Println("certName: ", certName)
-	if ossBucket != "" {
-		fmt.Println("ossBucket: ", ossBucket)
+	var config Config
+	err = yaml.Unmarshal(configData, &config)
+	if err != nil {
+		writeOutput("[ERROR] Failed to parse config file: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 对于 CDN
-	if ossBucket == "" {
-		client := cdn.NewClient(ACCESS_KEY_ID, ACCESS_KEY_SECRET)
+	if (*check && (*verify || *force)) || (*verify && *force) {
+		writeOutput("[ERROR] incompatible options\n")
+		os.Exit(2)
+	}
+	err = processProjects(config.Projects, *check, *verify, *force, cloudMatches, updateCertificateMaterial)
+	if config.QiyewechatWebhookUrl != "" && !*noNotify && !*check && !*verify {
+		err = sendAlert(config.QiyewechatWebhookUrl, allOutput)
+		if err != nil {
+			writeOutput("[ERROR] Failed to send webhook: %v", err)
+		}
+	}
+
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// extractDomainsFromCert 从证书中提取域名
+func extractDomainsFromCert(certPEM string) ([]string, error) {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("failed to parse certificate PEM")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	// Collect domains from SAN (Subject Alternative Names)
+	var domains []string
+	domains = append(domains, cert.DNSNames...)
+
+	return domains, nil
+}
+
+func updateCertificateMaterial(project Project, cert, key []byte) error {
+	// Generate a unique certificate name
+	certName := "cert" + time.Now().Format("20060102150405.000")
+
+	writeOutput("[INFO] Generated certificate name: %s\n", certName)
+
+	switch project.Mode {
+	case "alicdn":
+		client := cdn.NewClient(project.AccessKeyID, project.AccessKeySecret)
 		res, err := client.SetDomainServerCertificate(cdn.CertificateRequest{
-			DomainName:              domain,
+			DomainName:              project.Domain,
 			CertName:                certName,
 			ServerCertificateStatus: "on",
 			ServerCertificate:       string(cert),
 			PrivateKey:              string(key),
 		})
-
-		fmt.Printf("res: %v, err: %v\n", res, err)
-		return
-	}
-
-	// 对于 OSS
-	if ossBucket != "" {
-		os.Setenv("OSS_ACCESS_KEY_ID", ACCESS_KEY_ID)
-		os.Setenv("OSS_ACCESS_KEY_SECRET", ACCESS_KEY_SECRET)
-		region := os.Getenv("ALI_OSS_REGION")
-		if region == "" {
-			fmt.Println("Error: OSS_REGION is required")
-			os.Exit(-1)
+		if err != nil {
+			return fmt.Errorf("failed to update certificate via Alicdn: %v", err)
 		}
-		endpoint := os.Getenv("ALI_OSS_ENDPOINT")
+		writeOutput("[INFO] Alicdn response: %v\n", res)
+	case "alioss":
+		os.Setenv("OSS_ACCESS_KEY_ID", project.AccessKeyID)
+		os.Setenv("OSS_ACCESS_KEY_SECRET", project.AccessKeySecret)
+		if project.OssRegion == "" {
+			return fmt.Errorf("OSS_REGION is required")
+		}
 
-		// 证书管理服务客户端
 		casClient, err := cas20200407.NewClient(&openapi.Config{
-			AccessKeyId:     tea.String(ACCESS_KEY_ID),
-			AccessKeySecret: tea.String(ACCESS_KEY_SECRET),
-
-			// endpoint参考：https://api.aliyun.com/product/cas
-			Endpoint: tea.String("cas.aliyuncs.com"),
+			AccessKeyId:     tea.String(project.AccessKeyID),
+			AccessKeySecret: tea.String(project.AccessKeySecret),
+			Endpoint:        tea.String("cas.aliyuncs.com"),
 		})
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to create CAS client: %v", err)
 		}
+
 		req := new(cas20200407.UploadUserCertificateRequest)
-		// 证书名称
 		req.Name = tea.String(certName)
-		// 证书私钥
 		req.Key = tea.String(string(key))
-		// 证书内容
 		req.Cert = tea.String(string(cert))
-		// 上传证书到证书管理服务
 		resp, err := casClient.UploadUserCertificate(req)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to upload certificate to CAS: %v", err)
 		}
-
 		if *resp.StatusCode != 200 {
-			fmt.Println("Error:", resp.Body)
-			os.Exit(-1)
-		}
-
-		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("CAS response error: %v", resp.Body)
 		}
 
 		certId := resp.Body.CertId
-
-		// 创建OSSClient实例。
-		// yourEndpoint填写Bucket对应的Endpoint，以华东1（杭州）为例，填写为https://oss-cn-hangzhou.aliyuncs.com。其它Region请按实际情况填写。
-		client, err := oss.New(endpoint, ACCESS_KEY_ID, ACCESS_KEY_SECRET)
+		client, err := oss.New(project.OssEndpoint, project.AccessKeyID, project.AccessKeySecret)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to create OSS client: %v", err)
 		}
 
-		var putCnameConfig oss.PutBucketCname
-		var CertificateConfig oss.CertificateConfiguration
-		// 填写自定义域名。
-		putCnameConfig.Cname = domain
-		// 填写证书ID。
-		CertificateConfig.CertId = fmt.Sprintf("%d-%s", *certId, os.Getenv("OSS_REGION"))
-		// CertificateConfig.Certificate = string(cert)
-		// CertificateConfig.PrivateKey = string(key)
-		CertificateConfig.Force = true
-		putCnameConfig.CertificateConfiguration = &CertificateConfig
-		err = client.PutBucketCnameWithCertificate(ossBucket, putCnameConfig)
+		putCnameConfig := oss.PutBucketCname{
+			Cname: project.Domain,
+			CertificateConfiguration: &oss.CertificateConfiguration{
+				// cas.aliyuncs.com stores this upload in cn-hangzhou, even
+				// when the destination OSS bucket is in another region.
+				CertId: fmt.Sprintf("%d-cn-hangzhou", *certId),
+				Force:  true,
+			},
+		}
+		err = client.PutBucketCnameWithCertificate(project.OssBucket, putCnameConfig)
 		if err != nil {
-			fmt.Println("Error:", err)
-			os.Exit(-1)
+			return fmt.Errorf("failed to bind certificate to OSS: %v", err)
 		}
 
-		fmt.Printf("Bind Certificate Success!")
+		writeOutput("[INFO] Certificate bound successfully to OSS\n")
+	case "apisix":
+		if project.ApisixAdminURL == "" || project.ApisixAdminKey == "" {
+			return fmt.Errorf("APISIX admin URL and key are required for APISIX mode")
+		}
+
+		snis, err := extractDomainsFromCert(string(cert))
+		if err != nil {
+			return fmt.Errorf("failed to extract domains from certificate: %v", err)
+		}
+
+		// Prepare the payload for APISIX Admin API
+		payload := map[string]interface{}{
+			"cert": string(cert),
+			"key":  string(key),
+			"snis": snis,
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("failed to marshal payload: %v", err)
+		}
+
+		// Send the request to APISIX Admin API
+		encodedProjectName := url.QueryEscape(project.Name)
+		req, err := http.NewRequest("PUT", fmt.Sprintf("%s/apisix/admin/ssls/%s", project.ApisixAdminURL, encodedProjectName), bytes.NewBuffer(payloadBytes))
+		if err != nil {
+			return fmt.Errorf("failed to create HTTP request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", project.ApisixAdminKey)
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to send request to APISIX Admin API: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("APISIX Admin API responded with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		writeOutput("[INFO] Certificate updated successfully in APISIX\n")
+	case "k8s-secret":
+		clientset, err := getClientset()
+		if err != nil {
+			return fmt.Errorf("filed to get kuernates clientset: %+v", err)
+		}
+		err = updateK8sSecretCert(clientset, project, cert, key)
+		if err != nil {
+			return err
+		}
+		writeOutput("[INFO] kubernates' secret updated successfully\n")
+	default:
+		return fmt.Errorf("unsupported mode: %s", project.Mode)
 	}
+
+	return nil
 }
