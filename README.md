@@ -11,12 +11,13 @@ Update your Aliyun's CDN certificate automatically. 自动更新你的阿里云 
 ./aliyun-cdn-cert-bot --check --no-notify       # 检查全部配置、域名、有效期、证书与私钥匹配；无云请求
 ./aliyun-cdn-cert-bot --verify --no-notify      # 只读比较 CDN/OSS 云端证书指纹；不一致时返回非零
 ./aliyun-cdn-cert-bot --no-notify               # 云端一致则跳过，不一致则部署并回读验证
+./aliyun-cdn-cert-bot --notify-on-failure        # 正常部署成功静默，失败发送配置的群通知
 ./aliyun-cdn-cert-bot --force --no-notify       # 明确需要实测写权限时重新部署现有证书；不会签发证书
 ```
 
 可用 `--config /path/config.yml` 指定配置。所有目标先通过本地预检，才进行任何写入；读云端状态失败时不修改该目标。CDN 使用 `DescribeDomainCertificateInfo`，OSS 使用 `ListCname` 比较 SHA-1/SHA-256 指纹。APISIX 和 Kubernetes Secret 部署方式保持兼容，但 `--verify` 仅支持 CDN/OSS。
 
-定时任务和 acme reload 钩子应共用一个 `flock` 包装入口，避免并发换证。日常巡检建议使用 `--no-notify`；原 webhook 仅按所需的自动续期钩子保留。程序不签发证书，也不管理 ACME 账号或 DNS 记录。
+定时任务和 acme reload 钩子应共用一个 `flock` 包装入口，避免并发换证。每日部署建议使用 `--notify-on-failure`，成功静默、失败通知；`--no-notify`、`--check` 和 `--verify` 始终禁止通知。默认行为仍通知全部部署结果。部署失败或通知失败均返回非零退出码，通知成功不会覆盖部署失败。配置读取或解析失败时尚未取得可信通知地址，只返回失败。程序不签发证书，也不管理 ACME 账号或 DNS 记录。
 
 # Documents / 文档
 

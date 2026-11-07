@@ -56,6 +56,7 @@ func main() {
 	verify := flag.Bool("verify", false, "read cloud certificate status without updates")
 	force := flag.Bool("force", false, "deploy even when the cloud certificate already matches")
 	noNotify := flag.Bool("no-notify", false, "do not send the configured notification")
+	notifyOnFailure := flag.Bool("notify-on-failure", false, "send the configured notification only when deployment fails")
 	configPath := flag.String("config", "", "configuration path (defaults to executable directory)")
 	flag.Parse()
 	// 获取程序可执行文件所在目录
@@ -81,17 +82,24 @@ func main() {
 		writeOutput("[ERROR] incompatible options\n")
 		os.Exit(2)
 	}
-	err = processProjects(config.Projects, *check, *verify, *force, cloudMatches, updateCertificateMaterial)
-	if config.QiyewechatWebhookUrl != "" && !*noNotify && !*check && !*verify {
-		err = sendAlert(config.QiyewechatWebhookUrl, allOutput)
-		if err != nil {
-			writeOutput("[ERROR] Failed to send webhook: %v", err)
+	deploymentErr := processProjects(config.Projects, *check, *verify, *force, cloudMatches, updateCertificateMaterial)
+	notify := !*noNotify && !*check && !*verify && (!*notifyOnFailure || deploymentErr != nil)
+	os.Exit(deploymentExitCode(deploymentErr, config.QiyewechatWebhookUrl, notify))
+}
+
+// deploymentExitCode 分开保留部署和通知结果，通知成功不能掩盖部署失败。
+func deploymentExitCode(deploymentErr error, webhookURL string, notify bool) int {
+	var notificationErr error
+	if webhookURL != "" && notify {
+		notificationErr = sendAlert(webhookURL, allOutput)
+		if notificationErr != nil {
+			writeOutput("[ERROR] Failed to send webhook: %v\n", notificationErr)
 		}
 	}
-
-	if err != nil {
-		os.Exit(1)
+	if deploymentErr != nil || notificationErr != nil {
+		return 1
 	}
+	return 0
 }
 
 // extractDomainsFromCert 从证书中提取域名
